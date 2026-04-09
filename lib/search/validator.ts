@@ -1,7 +1,7 @@
 import type { DetectedPromotion } from './promotion-detector'
 
 const FETCH_TIMEOUT_MS = 8000
-const MAX_PAGE_CHARS = 15000
+const MAX_PAGE_CHARS = 8000
 
 export interface ValidationResult {
   valid: boolean
@@ -11,22 +11,6 @@ export interface ValidationResult {
   discount_pct: number | null
   confidence: 'high' | 'medium' | 'low'
 }
-
-const PROMO_KEYWORDS = [
-  'cupom', 'coupon', 'desconto', 'discount', 'promoção', 'promocao',
-  'oferta', 'sale', 'deal', 'off', 'economia', 'economize',
-]
-
-const EXPIRED_KEYWORDS = [
-  'expirado', 'expired', 'encerrado', 'ended', 'unavailable',
-  'não disponível', 'esgotado', 'out of stock', 'página não encontrada',
-  '404', 'not found',
-]
-
-const PRICE_BRL = /R\$\s?([\d.,]+)/gi
-const PRICE_USD = /\$([\d.,]+)/g
-const DISCOUNT_PCT = /(\d{1,3})\s*%\s*(off|desconto|de desconto|discount)/gi
-const COUPON_NEAR_KEYWORDS = /(?:use|código|code|cupom|coupon|promo)[:\s]+([A-Z0-9]{4,16})/gi
 
 async function fetchPageText(url: string): Promise<{ text: string; status: number } | null> {
   try {
@@ -50,7 +34,6 @@ async function fetchPageText(url: string): Promise<{ text: string; status: numbe
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, MAX_PAGE_CHARS)
-      .toLowerCase()
 
     return { text, status: res.status }
   } catch {
@@ -58,40 +41,79 @@ async function fetchPageText(url: string): Promise<{ text: string; status: numbe
   }
 }
 
-function extractPrice(text: string): number | null {
-  const matches = [...text.matchAll(PRICE_BRL)]
-  if (matches.length > 0) {
-    const val = matches[0][1].replace(/\./g, '').replace(',', '.')
-    const num = parseFloat(val)
-    return isNaN(num) ? null : num
+async function validateWithGemini(
+  pageText: string,
+  promo: DetectedPromotion,
+  productQuery: string
+): Promise<ValidationResult> {
+  const { GoogleGenerativeAI } = await import('@google/generative-ai')
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
+
+  const prompt = `Você é um validador de promoções e cupons. Analise se a promoção abaixo é real e válida com base no conteúdo da página.
+
+PRODUTO BUSCADO: ${productQuery}
+
+PROMOÇÃO DETECTADA:
+- Título: ${promo.title}
+- Cupom detectado: ${promo.coupon_code ?? 'nenhum'}
+- Preço detectado: ${promo.price ? `R$ ${promo.price}` : 'N/A'}
+- Desconto detectado: ${promo.discount_pct ? `${promo.discount_pct}%` : 'N/A'}
+
+CONTEÚDO DA PÁGINA:
+${pageText}
+
+Analise e responda APENAS com JSON neste formato exato (sem markdown, sem explicação):
+{
+  "valid": true ou false,
+  "reason": "explicação curta em português",
+  "coupon_code": "CODIGO" ou null,
+  "price": 123.45 ou null,
+  "discount_pct": 30 ou null,
+  "confidence": "high" ou "medium" ou "low"
+}
+
+Regras:
+- valid=false se: página não tem relação com o produto, promoção claramente expirada, cupom não aparece na página, página de erro
+- valid=true se: página confirma a promoção para o produto buscado
+- Extraia cupom, preço e desconto EXATOS da página (ignore o que foi detectado se a página mostrar valores diferentes)
+- confidence=high se cupom aparece claramente, medium se promoção existe mas cupom não confirmado, low se duvidoso`
+
+  const result = await model.generateContent(prompt)
+  const text = result.response.text().trim()
+
+  const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? '{}')
+
+  return {
+    valid: json.valid ?? false,
+    reason: json.reason ?? '',
+    coupon_code: json.coupon_code ?? null,
+    price: json.price ?? null,
+    discount_pct: json.discount_pct ?? null,
+    confidence: json.confidence ?? 'low',
   }
-  return null
 }
 
-function extractDiscount(text: string): number | null {
-  const match = DISCOUNT_PCT.exec(text)
-  DISCOUNT_PCT.lastIndex = 0
-  return match ? parseInt(match[1], 10) : null
-}
-
-function extractCoupon(text: string, hintCode: string | null): string | null {
-  // First try to find code near coupon keywords
-  const match = COUPON_NEAR_KEYWORDS.exec(text)
-  COUPON_NEAR_KEYWORDS.lastIndex = 0
-  if (match) return match[1].toUpperCase()
-
-  // If we have a hint code, check if it appears in the page
-  if (hintCode && text.includes(hintCode.toLowerCase())) {
-    return hintCode.toUpperCase()
+function fallbackValidation(
+  pageText: string,
+  promo: DetectedPromotion,
+  productQuery: string
+): ValidationResult {
+  const text = pageText.toLowerCase()
+  const expired = ['expirado', 'expired', 'encerrado', 'not found', '404', 'esgotado', 'não disponível']
+  if (expired.some((kw) => text.includes(kw))) {
+    return { valid: false, reason: 'Página indica promoção expirada', coupon_code: null, price: null, discount_pct: null, confidence: 'medium' }
   }
-
-  return null
-}
-
-function containsProductKeywords(text: string, productQuery: string): boolean {
   const words = productQuery.toLowerCase().split(/\s+/).filter((w) => w.length > 3)
-  const matchCount = words.filter((w) => text.includes(w)).length
-  return matchCount >= Math.ceil(words.length * 0.5) // at least 50% of keywords present
+  const match = words.filter((w) => text.includes(w)).length >= Math.ceil(words.length * 0.5)
+  return {
+    valid: match && promo.score >= 30,
+    reason: match ? 'Produto encontrado na página' : 'Produto não encontrado na página',
+    coupon_code: promo.coupon_code,
+    price: promo.price,
+    discount_pct: promo.discount_pct,
+    confidence: 'low',
+  }
 }
 
 export async function validatePromotion(
@@ -100,73 +122,23 @@ export async function validatePromotion(
 ): Promise<ValidationResult> {
   const result = await fetchPageText(promo.source_url)
 
-  // Link inaccessible
   if (!result) {
-    return {
-      valid: false,
-      reason: 'Link inacessível (timeout ou erro de rede)',
-      coupon_code: null, price: null, discount_pct: null, confidence: 'low',
-    }
+    return { valid: false, reason: 'Link inacessível', coupon_code: null, price: null, discount_pct: null, confidence: 'low' }
   }
 
-  // HTTP error
   if (result.status >= 400) {
-    return {
-      valid: false,
-      reason: `Link retornou erro HTTP ${result.status}`,
-      coupon_code: null, price: null, discount_pct: null, confidence: 'low',
+    return { valid: false, reason: `Erro HTTP ${result.status}`, coupon_code: null, price: null, discount_pct: null, confidence: 'high' }
+  }
+
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      return await validateWithGemini(result.text, promo, productQuery)
+    } catch (err) {
+      console.error('[validator] Gemini error, using fallback:', err)
     }
   }
 
-  const text = result.text
-
-  // Page signals expiry
-  const isExpired = EXPIRED_KEYWORDS.some((kw) => text.includes(kw))
-  if (isExpired) {
-    return {
-      valid: false,
-      reason: 'Página indica promoção expirada ou produto indisponível',
-      coupon_code: null, price: null, discount_pct: null, confidence: 'high',
-    }
-  }
-
-  // Check if page is related to the product
-  const hasProduct = containsProductKeywords(text, productQuery)
-
-  // Check for promo signals on page
-  const hasPromoSignal = PROMO_KEYWORDS.some((kw) => text.includes(kw))
-
-  // Extract data from actual page content
-  const couponCode = extractCoupon(text, promo.coupon_code)
-  const price = extractPrice(text) ?? promo.price
-  const discountPct = extractDiscount(text) ?? promo.discount_pct
-
-  // Score the result
-  let score = 0
-  if (hasProduct) score += 40
-  if (hasPromoSignal) score += 20
-  if (couponCode) score += 30
-  if (discountPct) score += 20
-  if (price) score += 10
-
-  if (score < 40) {
-    return {
-      valid: false,
-      reason: 'Página não tem sinais suficientes de promoção relacionada ao produto',
-      coupon_code: null, price: null, discount_pct: null, confidence: 'medium',
-    }
-  }
-
-  const confidence = score >= 80 ? 'high' : score >= 50 ? 'medium' : 'low'
-
-  return {
-    valid: true,
-    reason: `Promoção validada (score: ${score})`,
-    coupon_code: couponCode,
-    price,
-    discount_pct: discountPct,
-    confidence,
-  }
+  return fallbackValidation(result.text, promo, productQuery)
 }
 
 export async function validateAll(
