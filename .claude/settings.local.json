@@ -8,7 +8,12 @@
       "Bash(npx shadcn@latest add input label card badge select textarea sonner dialog dropdown-menu separator)",
       "Bash(git remote:*)",
       "Bash(npm run:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(curl -s http://localhost:3000/dashboard)",
+      "Bash(curl:*)",
+      "Bash(node:*)"
     ]
   }
 }
