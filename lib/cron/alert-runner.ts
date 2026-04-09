@@ -7,6 +7,7 @@ import {
   contentHash,
 } from '@/lib/search/promotion-detector'
 import { dispatchNotifications } from '@/lib/notifications/dispatcher'
+import { validateAll } from '@/lib/search/validator'
 import type { Alert, Profile } from '@/types'
 
 function getSupabase() {
@@ -66,20 +67,29 @@ async function processAlert(alert: Alert) {
   // 2. Detect promotions
   const organicPromos = detectFromOrganic(organicResults.organic, alert.id)
   const shoppingPromos = detectFromShopping(shoppingResults.shopping ?? [], alert.id)
-  const allDetected = [...organicPromos, ...shoppingPromos]
+  const rawDetected = [...organicPromos, ...shoppingPromos]
 
-  // 3. Persist (deduped by content_hash)
-  const rows = allDetected.map((p) => ({
-    alert_id: alert.id,
-    source_url: p.source_url,
-    title: p.title,
-    snippet: p.snippet,
-    coupon_code: p.coupon_code,
-    price: p.price,
-    original_price: p.original_price,
-    discount_pct: p.discount_pct,
-    content_hash: contentHash(alert.id, p.source_url, p.title),
-  }))
+  // 3. Validate with LLM (filters invalid links and fake coupons)
+  const productQuery = alert.search_query ?? alert.label
+  const allDetected = process.env.ANTHROPIC_API_KEY
+    ? await validateAll(rawDetected, productQuery)
+    : rawDetected
+
+  // 4. Persist (deduped by content_hash)
+  const rows = allDetected.map((p) => {
+    const v = 'validation' in p ? (p as { validation: { coupon_code: string | null; price: number | null; discount_pct: number | null } }).validation : null
+    return {
+      alert_id: alert.id,
+      source_url: p.source_url,
+      title: p.title,
+      snippet: p.snippet,
+      coupon_code: v?.coupon_code ?? p.coupon_code,
+      price: v?.price ?? p.price,
+      original_price: p.original_price,
+      discount_pct: v?.discount_pct ?? p.discount_pct,
+      content_hash: contentHash(alert.id, p.source_url, p.title),
+    }
+  })
 
   if (rows.length > 0) {
     await supabase
