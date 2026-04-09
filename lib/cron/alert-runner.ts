@@ -69,11 +69,9 @@ async function processAlert(alert: Alert) {
   const shoppingPromos = detectFromShopping(shoppingResults.shopping ?? [], alert.id)
   const rawDetected = [...organicPromos, ...shoppingPromos]
 
-  // 3. Validate with LLM (filters invalid links and fake coupons)
+  // 3. Validate (filters broken links, expired promos and false positives)
   const productQuery = alert.search_query ?? alert.label
-  const allDetected = process.env.ANTHROPIC_API_KEY
-    ? await validateAll(rawDetected, productQuery)
-    : rawDetected
+  const allDetected = await validateAll(rawDetected, productQuery)
 
   // 4. Persist (deduped by content_hash)
   const rows = allDetected.map((p) => {
