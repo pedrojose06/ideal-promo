@@ -1,7 +1,8 @@
 import type { DetectedPromotion } from './promotion-detector'
 
-const FETCH_TIMEOUT_MS = 8000
-const MAX_PAGE_CHARS = 8000
+const FETCH_TIMEOUT_MS = 4000
+const MAX_PAGE_CHARS = 3000
+const GEMINI_TIMEOUT_MS = 5000
 
 export interface ValidationResult {
   valid: boolean
@@ -79,7 +80,12 @@ Regras:
 - Extraia cupom, preço e desconto EXATOS da página (ignore o que foi detectado se a página mostrar valores diferentes)
 - confidence=high se cupom aparece claramente, medium se promoção existe mas cupom não confirmado, low se duvidoso`
 
-  const result = await model.generateContent(prompt)
+  const result = await Promise.race([
+    model.generateContent(prompt),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Gemini timeout')), GEMINI_TIMEOUT_MS)
+    ),
+  ])
   const text = result.response.text().trim()
 
   const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? '{}')

@@ -67,7 +67,7 @@ async function processAlert(alert: Alert) {
   // 2. Detect promotions
   const organicPromos = detectFromOrganic(organicResults.organic, alert.id)
   const shoppingPromos = detectFromShopping(shoppingResults.shopping ?? [], alert.id)
-  const rawDetected = [...organicPromos, ...shoppingPromos]
+  const rawDetected = [...organicPromos, ...shoppingPromos].slice(0, 5)
 
   // 3. Validate (filters broken links, expired promos and false positives)
   const productQuery = alert.search_query ?? alert.label
